@@ -32,13 +32,15 @@ libverbs RDMA_RC_example.c
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+
+static int page_size;
 /* poll CQ timeout in millisec (2 seconds) */
 #define MAX_POLL_CQ_TIMEOUT 8000
 #define MSG "SEND operation "
 #define RDMAMSGR "RDMA read operation "
 #define RDMAMSGW "RDMA write operation"
 //#define MSG_SIZE (strlen(MSG) + 1)
-#define MSG_SIZE (1024) // works in 1024
+#define MSG_SIZE (1025) // works in 1024
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 static inline uint64_t htonll(uint64_t x) { return bswap_64(x); }
 static inline uint64_t ntohll(uint64_t x) { return bswap_64(x); }
@@ -56,6 +58,7 @@ struct config_t
 	u_int32_t tcp_port;   /* server TCP port */
 	int ib_port;		  /* local IB port to work with */
 	int gid_idx;		  /* gid index to use */
+	int buf_sz;
 };
 /* structure to exchange data which is needed to connect the QPs */
 struct cm_con_data_t
@@ -89,6 +92,7 @@ struct config_t config = {
 	NULL,  /* server_name */
 	19875, /* tcp_port */
 	1,	 /* ib_port */
+	1024,	 /* buf sz*/
 	-1 /* gid_idx */};
 
 /******************************************************************************
@@ -315,7 +319,7 @@ static int post_send(struct resources *res, int opcode)
 	/* prepare the scatter/gather entry */
 	memset(&sge, 0, sizeof(sge));
 	sge.addr = (uintptr_t)res->buf;
-	sge.length = MSG_SIZE;
+	sge.length = config.buf_sz;
 	sge.lkey = res->mr->lkey;
 	/* prepare the send work request */
 	memset(&sr, 0, sizeof(sr));
@@ -378,7 +382,7 @@ static int post_receive(struct resources *res)
 	/* prepare the scatter/gather entry */
 	memset(&sge, 0, sizeof(sge));
 	sge.addr = (uintptr_t)res->buf;
-	sge.length = MSG_SIZE;
+	sge.length = config.buf_sz;
 	sge.lkey = res->mr->lkey;
 	/* prepare the receive work request */
 	memset(&rr, 0, sizeof(rr));
@@ -542,8 +546,8 @@ static int resources_create(struct resources *res)
 		goto resources_create_exit;
 	}
 	/* allocate the memory buffer that will hold the data */
-	size = MSG_SIZE; // frank, enlarge size, i.e, 602112* batch 64=38535168. or 1072812*64=68659968
-	res->buf = (char *)malloc(size);
+	size = config.buf_sz; // frank, enlarge size, i.e, 602112* batch 64=38535168. or 1072812*64=68659968
+	posix_memalign((void **)&res->buf, page_size, config.buf_sz);
 	if (!res->buf)
 	{
 		fprintf(stderr, "failed to malloc %Zu bytes to memory buffer\n", size);
@@ -1001,6 +1005,7 @@ int main(int argc, char *argv[])
 			{.name = "ib-dev", .has_arg = 1, .val = 'd'},
 			{.name = "ib-port", .has_arg = 1, .val = 'i'},
 			{.name = "gid-idx", .has_arg = 1, .val = 'g'},
+			{.name = "size", .has_arg = 1, .val = 's'},
 			{.name = NULL, .has_arg = 0, .val = '\0'}
         };
 		c = getopt_long(argc, argv, "p:d:i:g:", long_options, NULL);
@@ -1030,6 +1035,14 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			break;
+		case 's':
+			config.buf_sz= strtoul(optarg, NULL, 0);
+			if (config.buf_sz < 0)
+			{
+				usage(argv[0]);
+				return 1;
+			}
+			break;
 		default:
 			usage(argv[0]);
 			return 1;
@@ -1046,6 +1059,7 @@ int main(int argc, char *argv[])
 		usage(argv[0]);
 		return 1;
 	}
+	page_size = sysconf(_SC_PAGESIZE);
 	/* print the used parameters for info*/
 	print_config();
 	/* init all of the resources, so cleanup will be easy */
