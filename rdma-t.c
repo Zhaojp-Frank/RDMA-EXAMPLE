@@ -40,7 +40,7 @@ static int page_size;
 #define RDMAMSGR "RDMA read operation "
 #define RDMAMSGW "RDMA write operation"
 //#define MSG_SIZE (strlen(MSG) + 1)
-#define MSG_SIZE (1025) // works in 1024
+#define MSG_SIZE (1024) // works in 1024
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 static inline uint64_t htonll(uint64_t x) { return bswap_64(x); }
 static inline uint64_t ntohll(uint64_t x) { return bswap_64(x); }
@@ -92,8 +92,9 @@ struct config_t config = {
 	NULL,  /* server_name */
 	19875, /* tcp_port */
 	1,	 /* ib_port */
-	1024,	 /* buf sz*/
-	-1 /* gid_idx */};
+	-1, /* gid_idx */
+	4096	 /* buf sz*/
+};
 
 /******************************************************************************
 Socket operations
@@ -331,15 +332,14 @@ static int post_send(struct resources *res, int opcode)
 	sr.send_flags = IBV_SEND_SIGNALED;
 	if (opcode != IBV_WR_SEND)
 	{
-		sr.wr.rdma.remote_addr = res->remote_props.addr;
+		sr.wr.rdma.remote_addr = res->remote_props.addr; //frank able to access via rAddr+offet
 		sr.wr.rdma.rkey = res->remote_props.rkey;
 	}
 	/* there is a Receive Request in the responder side, so we won't get any into RNR flow */
 	rc = ibv_post_send(res->qp, &sr, &bad_wr);
-	if (rc)
+	if (rc) {
 		fprintf(stderr, "failed to post SR\n");
-	else
-	{
+	} else {
 		switch (opcode)
 		{
 		case IBV_WR_SEND:
@@ -358,6 +358,7 @@ static int post_send(struct resources *res, int opcode)
 	}
 	return rc;
 }
+
 /******************************************************************************
 * Function: post_receive
 *
@@ -546,6 +547,7 @@ static int resources_create(struct resources *res)
 		goto resources_create_exit;
 	}
 	/* allocate the memory buffer that will hold the data */
+	config.buf_sz = MSG_SIZE; // frank, enlarge size, i.e, 602112* batch 64=38535168. or 1072812*64=68659968
 	size = config.buf_sz; // frank, enlarge size, i.e, 602112* batch 64=38535168. or 1072812*64=68659968
 	posix_memalign((void **)&res->buf, page_size, config.buf_sz);
 	if (!res->buf)
@@ -973,7 +975,8 @@ static void usage(const char *argv0)
 	fprintf(stdout, " -p, --port <port> listen on/connect to port <port> (default 18515)\n");
 	fprintf(stdout, " -d, --ib-dev <dev> use IB device <dev> (default first device found)\n");
 	fprintf(stdout, " -i, --ib-port <port> use port <port> of IB device (default 1)\n");
-	fprintf(stdout, " -g, --gid_idx <git index> gid index to be used in GRH (default not used)\n");
+	fprintf(stdout, " -g, --gid_idx <git index> gid index to be used in GRH (default not used, required for RoCE)\n");
+	fprintf(stdout, " -s, --size <msg size> (default 1024B)\n");
 }
 /******************************************************************************
 * Function: main
@@ -1008,7 +1011,7 @@ int main(int argc, char *argv[])
 			{.name = "size", .has_arg = 1, .val = 's'},
 			{.name = NULL, .has_arg = 0, .val = '\0'}
         };
-		c = getopt_long(argc, argv, "p:d:i:g:", long_options, NULL);
+		c = getopt_long(argc, argv, "p:d:i:g:s", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c)
@@ -1036,7 +1039,7 @@ int main(int argc, char *argv[])
 			}
 			break;
 		case 's':
-			config.buf_sz= strtoul(optarg, NULL, 0);
+			config.buf_sz = strtoul(optarg, NULL, 0);
 			if (config.buf_sz < 0)
 			{
 				usage(argv[0]);
@@ -1122,7 +1125,7 @@ Note that the server has no idea these events have occured */
 			rc = 1;
 			goto main_exit;
 		}
-		fprintf(stdout, "Contents of server's buffer: '%s'\n", res.buf);
+		fprintf(stdout, "Contents of server's buffer1: '%s'\n", res.buf);
 		/* Now we replace what's in the server's buffer */
 /*
 		strcpy(res.buf, RDMAMSGW);
@@ -1150,7 +1153,7 @@ Note that the server has no idea these events have occured */
 		goto main_exit;
 	}
 	if (!config.server_name) { // server. frank show final data
-		fprintf(stdout, "Contents of server buffer: '%s'\n", res.buf);
+		fprintf(stdout, "Contents of server buffer2: '%s'\n", res.buf);
 	}
 	rc = 0;
 main_exit:
