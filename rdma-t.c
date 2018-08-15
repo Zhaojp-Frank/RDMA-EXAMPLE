@@ -33,11 +33,12 @@ libverbs RDMA_RC_example.c
 #include <sys/socket.h>
 #include <netdb.h>
 /* poll CQ timeout in millisec (2 seconds) */
-#define MAX_POLL_CQ_TIMEOUT 2000
+#define MAX_POLL_CQ_TIMEOUT 8000
 #define MSG "SEND operation "
 #define RDMAMSGR "RDMA read operation "
 #define RDMAMSGW "RDMA write operation"
-#define MSG_SIZE (strlen(MSG) + 1)
+//#define MSG_SIZE (strlen(MSG) + 1)
+#define MSG_SIZE (2048) // works in 1024
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 static inline uint64_t htonll(uint64_t x) { return bswap_64(x); }
 static inline uint64_t ntohll(uint64_t x) { return bswap_64(x); }
@@ -79,10 +80,10 @@ struct resources
 	struct ibv_cq *cq;				   /* CQ handle */
 	struct ibv_qp *qp;				   /* QP handle */
 	struct ibv_mr *mr;				   /* MR handle for buf */
-	char *buf;						   /* memory buffer pointer, used for RDMA and send
-ops */
+	char *buf;						   /* memory buffer pointer, used for RDMA and send ops .frank*/
 	int sock;						   /* TCP socket file descriptor */
 };
+
 struct config_t config = {
 	NULL,  /* dev_name */
 	NULL,  /* server_name */
@@ -532,7 +533,7 @@ static int resources_create(struct resources *res)
 		goto resources_create_exit;
 	}
 	/* each side will send only one WR, so Completion Queue with 1 entry is enough */
-	cq_size = 1;
+	cq_size = 4; //frank may enlarge it? i.e., 2~4?
 	res->cq = ibv_create_cq(res->ib_ctx, cq_size, NULL, NULL, 0);
 	if (!res->cq)
 	{
@@ -541,7 +542,7 @@ static int resources_create(struct resources *res)
 		goto resources_create_exit;
 	}
 	/* allocate the memory buffer that will hold the data */
-	size = MSG_SIZE;
+	size = MSG_SIZE; // frank, enlarge size, i.e, 602112* batch 64=38535168. or 1072812*64=68659968
 	res->buf = (char *)malloc(size);
 	if (!res->buf)
 	{
@@ -552,7 +553,7 @@ static int resources_create(struct resources *res)
 	memset(res->buf, 0, size);
 	/* only in the server side put the message in the memory buffer */
 	if (!config.server_name)
-	{
+	{ //server side
 		strcpy(res->buf, MSG);
 		fprintf(stdout, "going to send the message: '%s'\n", res->buf);
 	}
@@ -575,8 +576,8 @@ static int resources_create(struct resources *res)
 	qp_init_attr.sq_sig_all = 1;
 	qp_init_attr.send_cq = res->cq;
 	qp_init_attr.recv_cq = res->cq;
-	qp_init_attr.cap.max_send_wr = 1;
-	qp_init_attr.cap.max_recv_wr = 1;
+	qp_init_attr.cap.max_send_wr = 8; //frank only 1?? entry or byte?
+	qp_init_attr.cap.max_recv_wr = 8;
 	qp_init_attr.cap.max_send_sge = 1;
 	qp_init_attr.cap.max_recv_sge = 1;
 	res->qp = ibv_create_qp(res->pd, &qp_init_attr);
@@ -691,11 +692,11 @@ static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dli
 	int rc;
 	memset(&attr, 0, sizeof(attr));
 	attr.qp_state = IBV_QPS_RTR;
-	attr.path_mtu = IBV_MTU_256;
+	attr.path_mtu = IBV_MTU_4096;
 	attr.dest_qp_num = remote_qpn;
 	attr.rq_psn = 0;
 	attr.max_dest_rd_atomic = 1;
-	attr.min_rnr_timer = 0x12;
+	attr.min_rnr_timer = 0x12; //frank or 0x12
 	attr.ah_attr.is_global = 0;
 	attr.ah_attr.dlid = dlid;
 	attr.ah_attr.sl = 0;
@@ -799,6 +800,7 @@ static int connect_qp(struct resources *res)
 		rc = 1;
 		goto connect_qp_exit;
 	}
+	// frank exchange info including raddr, rkey, qp_num, lid gid
 	remote_con_data.addr = ntohll(tmp_con_data.addr);
 	remote_con_data.rkey = ntohl(tmp_con_data.rkey);
 	remote_con_data.qp_num = ntohl(tmp_con_data.qp_num);
@@ -825,7 +827,7 @@ static int connect_qp(struct resources *res)
 	}
 	/* let the client post RR to be prepared for incoming messages */
 	if (config.server_name)
-	{
+	{ // client
 		rc = post_receive(res);
 		if (rc)
 		{
@@ -1061,12 +1063,13 @@ int main(int argc, char *argv[])
 		goto main_exit;
 	}
 	/* let the server post the sr */
-	if (!config.server_name)
+	if (!config.server_name) { //server
 		if (post_send(&res, IBV_WR_SEND))
 		{
 			fprintf(stderr, "failed to post sr\n");
 			goto main_exit;
 		}
+	}
 	/* in both sides we expect to get a completion */
 	if (poll_completion(&res))
 	{
@@ -1074,24 +1077,24 @@ int main(int argc, char *argv[])
 		goto main_exit;
 	}
 	/* after polling the completion we have the message in the client buffer too */
-	if (config.server_name)
+	if (config.server_name) { // client
 		fprintf(stdout, "Message is: '%s'\n", res.buf);
-	else
-	{
-		/* setup server buffer with read message */
+	}else {
+		/* setup server buffer with read message frank. prepare the data*/
 		strcpy(res.buf, RDMAMSGR);
 	}
 	/* Sync so we are sure server side has data ready before client tries to read it */
 	if (sock_sync_data(res.sock, 1, "R", &temp_char)) /* just send a dummy char back and forth */
-	{
+	{ // frank, just as barrier to ensure data in server is ready
 		fprintf(stderr, "sync error before RDMA ops\n");
 		rc = 1;
 		goto main_exit;
 	}
+
 	/* Now the client performs an RDMA read and then write on server.
 Note that the server has no idea these events have occured */
 	if (config.server_name)
-	{
+	{ // frank client. rdma read, then poll complte; next rdma write it and poll cq
 		/* First we read contens of server's buffer */
 		if (post_send(&res, IBV_WR_RDMA_READ))
 		{
@@ -1107,6 +1110,7 @@ Note that the server has no idea these events have occured */
 		}
 		fprintf(stdout, "Contents of server's buffer: '%s'\n", res.buf);
 		/* Now we replace what's in the server's buffer */
+/*
 		strcpy(res.buf, RDMAMSGW);
 		fprintf(stdout, "Now replacing it with: '%s'\n", res.buf);
 		if (post_send(&res, IBV_WR_RDMA_WRITE))
@@ -1121,7 +1125,9 @@ Note that the server has no idea these events have occured */
 			rc = 1;
 			goto main_exit;
 		}
+*/
 	}
+
 	/* Sync so server will know that client is done mucking with its memory */
 	if (sock_sync_data(res.sock, 1, "W", &temp_char)) /* just send a dummy char back and forth */
 	{
@@ -1129,8 +1135,9 @@ Note that the server has no idea these events have occured */
 		rc = 1;
 		goto main_exit;
 	}
-	if (!config.server_name)
+	if (!config.server_name) { // server. frank show final data
 		fprintf(stdout, "Contents of server buffer: '%s'\n", res.buf);
+	}
 	rc = 0;
 main_exit:
 	if (resources_destroy(&res))
