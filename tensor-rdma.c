@@ -38,6 +38,7 @@ libverbs RDMA_RC_example.c
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <assert.h>
+#include "crc32.h"
 
 static int page_size;
 /* poll CQ timeout in millisec (2 seconds) */
@@ -71,6 +72,7 @@ struct config_t
 	int labelSz;
 	int batchSz;
 	int batchNum;
+	int devNum;
 };
 
 /* structure to exchange data which is needed to connect the QPs */
@@ -298,7 +300,7 @@ static int poll_completion(struct resources *res)
 	else
 	{
 		/* CQE found */
-		fprintf(stdout, "completion was found in CQ with status 0x%x\n", wc.status);
+		//fprintf(stdout, "completion was found in CQ with status 0x%x\n", wc.status);
 		/* check the completion status (here we don't care about the completion opcode */
 		if (wc.status != IBV_WC_SUCCESS)
 		{
@@ -347,6 +349,7 @@ static int post_send(struct resources *res, int opcode, int iter)
 	if (opcode != IBV_WR_SEND)
 	{
 		sr.wr.rdma.remote_addr = res->remote_props.addr + iter*config.buf_sz; //frank able to access via rAddr+offet
+		//printf("Remote addr[%d]: %lx \n", iter, sr.wr.rdma.remote_addr);
 		sr.wr.rdma.rkey = res->remote_props.rkey;
 	}
 	/* there is a Receive Request in the responder side, so we won't get any into RNR flow */
@@ -360,10 +363,10 @@ static int post_send(struct resources *res, int opcode, int iter)
 			fprintf(stdout, "Send Request was posted\n");
 			break;
 		case IBV_WR_RDMA_READ:
-			fprintf(stdout, "RDMA Read Request was posted\n");
+			//fprintf(stdout, "RDMA Read Request was posted\n");
 			break;
 		case IBV_WR_RDMA_WRITE:
-			fprintf(stdout, "RDMA Write Request was posted\n");
+			//fprintf(stdout, "RDMA Write Request was posted\n");
 			break;
 		default:
 			fprintf(stdout, "Unknown Request was posted\n");
@@ -447,7 +450,7 @@ static int prepare_tensorMem(struct resources *res, int fillIt)
   char fileP[96], cmd[96];
 	char *dirP ="/var/run/remoteP/uuid123";
 	int devId = 0, rc =0;
-	int splitF = 0;
+	int splitF = 1;
   int fd; //[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
 
 	// alloc the big buf, [dataSz+label]*batch
@@ -456,7 +459,6 @@ static int prepare_tensorMem(struct resources *res, int fillIt)
 	} else {
 		totalSz = (dataSz+labelSz);
 	}
-	config.buf_sz = dataSz + labelSz;
 	printf("To alloc buf sz:%u\n", totalSz);
 	posix_memalign((void **)&res->buf, page_size, totalSz); 	
 	assert(res->buf);
@@ -480,10 +482,12 @@ static int prepare_tensorMem(struct resources *res, int fillIt)
 	void *mapIt = NULL;
 	char *curOffset = res->buf;
 	for (j= 0; j< batchStep; j++) {
+			char *iterStart = curOffset;
+			unsigned int crc = 0xffffffff;
 			// data tensor
       snprintf(fileP, sizeof(fileP), "%s/data-dev%d-loop%d-%d", dirP, devId, j, splitF);       
       char *fp = fileP;
-			printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
+			//printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
 			while (1) { fd = open(fp, O_RDONLY, 0); if (fd>0) break; } assert(fd != -1);
 			if (j == 0) {
         struct stat st;
@@ -493,12 +497,13 @@ static int prepare_tensorMem(struct resources *res, int fillIt)
       mapIt = mmap(NULL, dataFileSz, PROT_READ, MAP_SHARED, fd, 0); 
       memcpy(curOffset,  mapIt+dataOffset, dataSz);
       curOffset += dataSz;
+			//int * pD = (int *)(mapIt+dataOffset); printf("Fill tensor [%d], %x %x \n", j, *pD, *(pD+1));
 			rc = munmap(mapIt, dataFileSz); assert(rc == 0);	
 
 			// label
       snprintf(fileP, sizeof(fileP), "%s/label-dev%d-loop%d", dirP, devId, j);       
       fp = fileP;
-      printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
+      //printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
       while (1) { fd = open(fp, O_RDONLY, 0); if (fd>0) break; } assert(fd != -1);
 			if (j == 0) {
         struct stat st;
@@ -514,9 +519,12 @@ static int prepare_tensorMem(struct resources *res, int fillIt)
       	memcpy(p+i, pChar+i, 1);
       	//printf("%x ", *(p+i)); if (i%8 ==0) {printf("\n");fflush(stdout); }
     	}
-      curOffset += batchSz*sizeof(int);
+      curOffset += labelSz;
 
 			rc = munmap(mapIt, labelFileSz); assert(rc == 0);	
+			//crc = crc32(crc, res->buf+(dataSz+labelSz)*j, dataSz+labelSz);
+			//pD = (int *)(res->buf+(dataSz+labelSz)*j);
+			//printf("Fill tensor [%d], %x %x crc:%x\n", j, *pD, *(pD+1), crc);
     }
 
 	return rc;
@@ -1153,9 +1161,15 @@ int main(int argc, char *argv[])
 	config.labelSz= 256;
 	config.batchSz= 64;
 	config.batchNum= 19;
+	config.devNum= 1;
+	config.buf_sz = config.dataSz + config.labelSz;
+	init_crc_table();
+
 	/* print the used parameters for info*/
 	print_config();
 	/* init all of the resources, so cleanup will be easy */
+
+////// launch thread per dev
 	resources_init(&res);
 	/* create resources before using them */
 	if (resources_create(&res))
@@ -1186,9 +1200,6 @@ int main(int argc, char *argv[])
 	/* after polling the completion we have the message in the client buffer too */
 	if (config.server_name) { // client
 		fprintf(stdout, "Message is: '%s'\n", res.buf);
-	}else {
-		/* setup server buffer with read message frank. prepare the data*/
-		strcpy(res.buf, RDMAMSGR);
 	}
 	/* Sync so we are sure server side has data ready before client tries to read it */
 	if (sock_sync_data(res.sock, 1, "R", &temp_char)) /* just send a dummy char back and forth */
@@ -1203,7 +1214,9 @@ Note that the server has no idea these events have occured */
 	if (config.server_name)
 	{ // frank client. rdma read, then poll complte; next rdma write it and poll cq
 		int i = 0;
-		for (i=0; i<10; i++) {
+		for (i=0; i<config.batchNum; i++) {
+			unsigned int crc = 0xffffffff;
+			memset(res.buf, 0, config.buf_sz);
 		/* First we read contens of server's buffer */
 		if (post_send(&res, IBV_WR_RDMA_READ, i))
 		{
@@ -1217,8 +1230,10 @@ Note that the server has no idea these events have occured */
 			rc = 1;
 			goto main_exit;
 		}
-		//fprintf(stdout, "Contents of server's buffer [%d]: %s\n", i, res.buf);
-		memset(res.buf, 0, config.buf_sz);
+		//crc = crc32(crc, res.buf, config.buf_sz);
+		//int *pD = (int *)res.buf;
+		//printf("Got tensor [%d], %x %x crc:%x\n", i, *pD, *(pD+1), crc);
+
 		/* Now we replace what's in the server's buffer */
 /*
 		strcpy(res.buf, RDMAMSGW);
