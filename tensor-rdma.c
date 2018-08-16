@@ -437,7 +437,7 @@ static void resources_init(struct resources *res)
 // alloc a big buf, read tensor files into then large buf, mem_rg
 // [batch1.data][batch1.label][batch2.data][batch2.label]
 // each for one dev
-static int pack_tensorMem(struct resources *res, int fillIt) 
+static int prepare_tensorMem(struct resources *res, int fillIt) 
 {
   int dataOffset = 137, labelOffset = 80, fileSz[9];
   //snprintf(dirP, sizeof(dirP), "/run/remoteP/%s", CLPREFETCH(uuid));
@@ -449,7 +449,6 @@ static int pack_tensorMem(struct resources *res, int fillIt)
 	int devId = 0, rc =0;
 	int splitF = 0;
   int fd; //[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
-	batchStep += 10; //warmup
 
 	// alloc the big buf, [dataSz+label]*batch
 	if (fillIt) {
@@ -497,7 +496,7 @@ static int pack_tensorMem(struct resources *res, int fillIt)
 			rc = munmap(mapIt, dataFileSz); assert(rc == 0);	
 
 			// label
-      snprintf(fileP, sizeof(fileP), "%s/label-dev%d-loop%d-%d", dirP, devId, j, splitF);       
+      snprintf(fileP, sizeof(fileP), "%s/label-dev%d-loop%d", dirP, devId, j);       
       fp = fileP;
       printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
       while (1) { fd = open(fp, O_RDONLY, 0); if (fd>0) break; } assert(fd != -1);
@@ -653,10 +652,10 @@ static int resources_create(struct resources *res)
 
 	if (!config.server_name) {
 		// rdma server, prepare the big buf, fill content 
-		pack_tensorMem(res, 1);
+		prepare_tensorMem(res, 1);
 	} else {
 		// client, only prepare one buf
-		pack_tensorMem(res, 0);
+		prepare_tensorMem(res, 0);
 	}
 
 	/* create the Queue Pair */
@@ -1030,6 +1029,10 @@ static void print_config(void)
 	fprintf(stdout, " TCP port : %u\n", config.tcp_port);
 	if (config.gid_idx >= 0)
 		fprintf(stdout, " GID index : %u\n", config.gid_idx);
+		fprintf(stdout, " Tensor dataSz: %u\n", config.dataSz);
+		fprintf(stdout, " Tensor labelSz: %u\n", config.labelSz);
+		fprintf(stdout, " Tensor batchSz: %u\n", config.batchSz);
+		fprintf(stdout, " Tensor batchNum: %u\n", config.batchNum);
 	fprintf(stdout, " ------------------------------------------------\n\n");
 }
 
@@ -1146,6 +1149,10 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	page_size = sysconf(_SC_PAGESIZE);
+	config.dataSz = 38535168;
+	config.labelSz= 256;
+	config.batchSz= 64;
+	config.batchNum= 19;
 	/* print the used parameters for info*/
 	print_config();
 	/* init all of the resources, so cleanup will be easy */
