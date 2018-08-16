@@ -33,6 +33,12 @@ libverbs RDMA_RC_example.c
 #include <sys/socket.h>
 #include <netdb.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <assert.h>
+
 static int page_size;
 /* poll CQ timeout in millisec (2 seconds) */
 #define MAX_POLL_CQ_TIMEOUT 8000
@@ -58,8 +64,15 @@ struct config_t
 	u_int32_t tcp_port;   /* server TCP port */
 	int ib_port;		  /* local IB port to work with */
 	int gid_idx;		  /* gid index to use */
-	int buf_sz;
+	int buf_sz; // each RDMA buf sz
+
+	char *tensorDir;
+	int dataSz;
+	int labelSz;
+	int batchSz;
+	int batchNum;
 };
+
 /* structure to exchange data which is needed to connect the QPs */
 struct cm_con_data_t
 {
@@ -312,7 +325,7 @@ static int poll_completion(struct resources *res)
 * Description
 * This function will create and post a send work request
 ******************************************************************************/
-static int post_send(struct resources *res, int opcode)
+static int post_send(struct resources *res, int opcode, int iter)
 {
 	struct ibv_send_wr sr;
 	struct ibv_sge sge;
@@ -333,7 +346,7 @@ static int post_send(struct resources *res, int opcode)
 	sr.send_flags = IBV_SEND_SIGNALED;
 	if (opcode != IBV_WR_SEND)
 	{
-		sr.wr.rdma.remote_addr = res->remote_props.addr; //frank able to access via rAddr+offet
+		sr.wr.rdma.remote_addr = res->remote_props.addr + iter*config.buf_sz; //frank able to access via rAddr+offet
 		sr.wr.rdma.rkey = res->remote_props.rkey;
 	}
 	/* there is a Receive Request in the responder side, so we won't get any into RNR flow */
@@ -420,6 +433,96 @@ static void resources_init(struct resources *res)
 	memset(res, 0, sizeof *res);
 	res->sock = -1;
 }
+
+// alloc a big buf, read tensor files into then large buf, mem_rg
+// [batch1.data][batch1.label][batch2.data][batch2.label]
+// each for one dev
+static int pack_tensorMem(struct resources *res, int fillIt) 
+{
+  int dataOffset = 137, labelOffset = 80, fileSz[9];
+  //snprintf(dirP, sizeof(dirP), "/run/remoteP/%s", CLPREFETCH(uuid));
+  //
+	// ResNet50: batch=64
+  int dataSz = config.dataSz, labelSz= config.labelSz, batchSz=config.batchSz, batchStep =config.batchNum, totalSz = 0;
+  char fileP[96], cmd[96];
+	char *dirP ="/var/run/remoteP/uuid123";
+	int devId = 0, rc =0;
+	int splitF = 0;
+  int fd; //[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+	batchStep += 10; //warmup
+
+	// alloc the big buf, [dataSz+label]*batch
+	if (fillIt) {
+		totalSz = (dataSz+labelSz)*batchStep;
+	} else {
+		totalSz = (dataSz+labelSz);
+	}
+	config.buf_sz = dataSz + labelSz;
+	printf("To alloc buf sz:%u\n", totalSz);
+	posix_memalign((void **)&res->buf, page_size, totalSz); 	
+	assert(res->buf);
+	memset(res->buf, 0, totalSz);
+	/* register the memory buffer */
+	int mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+	res->mr = ibv_reg_mr(res->pd, res->buf, totalSz, mr_flags);
+	if (!res->mr)
+	{
+		fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
+		assert(0);
+	}
+	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
+			res->buf, res->mr->lkey, res->mr->rkey, mr_flags);
+	if (fillIt == 0) {
+		return 0;
+	}
+
+	// Copy tensors into the buf. for server side
+	int buf_offset = 0, dataFileSz = 0, labelFileSz = 0, j=0;
+	void *mapIt = NULL;
+	char *curOffset = res->buf;
+	for (j= 0; j< batchStep; j++) {
+			// data tensor
+      snprintf(fileP, sizeof(fileP), "%s/data-dev%d-loop%d-%d", dirP, devId, j, splitF);       
+      char *fp = fileP;
+			printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
+			while (1) { fd = open(fp, O_RDONLY, 0); if (fd>0) break; } assert(fd != -1);
+			if (j == 0) {
+        struct stat st;
+        stat(fp, &st);
+        dataFileSz = st.st_size;
+			}
+      mapIt = mmap(NULL, dataFileSz, PROT_READ, MAP_SHARED, fd, 0); 
+      memcpy(curOffset,  mapIt+dataOffset, dataSz);
+      curOffset += dataSz;
+			rc = munmap(mapIt, dataFileSz); assert(rc == 0);	
+
+			// label
+      snprintf(fileP, sizeof(fileP), "%s/label-dev%d-loop%d-%d", dirP, devId, j, splitF);       
+      fp = fileP;
+      printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
+      while (1) { fd = open(fp, O_RDONLY, 0); if (fd>0) break; } assert(fd != -1);
+			if (j == 0) {
+        struct stat st;
+        stat(fp, &st);
+        labelFileSz = st.st_size;
+			}
+      mapIt = mmap(NULL, labelFileSz, PROT_READ, MAP_SHARED, fd, 0); 
+    	int *p = (int *)curOffset;
+    	char *pChar= (char *)mapIt + labelOffset;
+			//label serialized as 1B, turn it as 4B
+			int i  = 0;
+    	for (i = 0; i< batchSz; i++) {
+      	memcpy(p+i, pChar+i, 1);
+      	//printf("%x ", *(p+i)); if (i%8 ==0) {printf("\n");fflush(stdout); }
+    	}
+      curOffset += batchSz*sizeof(int);
+
+			rc = munmap(mapIt, labelFileSz); assert(rc == 0);	
+    }
+
+	return rc;
+}
+
 /******************************************************************************
 * Function: resources_create
 *
@@ -547,36 +650,15 @@ static int resources_create(struct resources *res)
 		rc = 1;
 		goto resources_create_exit;
 	}
-	/* allocate the memory buffer that will hold the data */
-	config.buf_sz = MSG_SIZE; // frank, enlarge size, i.e, 602112* batch 64=38535168. or 1072812*64=68659968
-	size = config.buf_sz; // frank, enlarge size, i.e, 602112* batch 64=38535168. or 1072812*64=68659968
-	posix_memalign((void **)&res->buf, page_size, config.buf_sz);
-	if (!res->buf)
-	{
-		fprintf(stderr, "failed to malloc %Zu bytes to memory buffer\n", size);
-		rc = 1;
-		goto resources_create_exit;
+
+	if (!config.server_name) {
+		// rdma server, prepare the big buf, fill content 
+		pack_tensorMem(res, 1);
+	} else {
+		// client, only prepare one buf
+		pack_tensorMem(res, 0);
 	}
-	memset(res->buf, 0, size);
-	/* only in the server side put the message in the memory buffer */
-	if (!config.server_name)
-	{ //server side
-		strcpy(res->buf, MSG);
-		fprintf(stdout, "going to send the message: '%s'\n", res->buf);
-	}
-	else
-		memset(res->buf, 0, size);
-	/* register the memory buffer */
-	mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
-	res->mr = ibv_reg_mr(res->pd, res->buf, size, mr_flags);
-	if (!res->mr)
-	{
-		fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n", mr_flags);
-		rc = 1;
-		goto resources_create_exit;
-	}
-	fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-			res->buf, res->mr->lkey, res->mr->rkey, mr_flags);
+
 	/* create the Queue Pair */
 	memset(&qp_init_attr, 0, sizeof(qp_init_attr));
 	qp_init_attr.qp_type = IBV_QPT_RC;
@@ -1082,7 +1164,7 @@ int main(int argc, char *argv[])
 	}
 	/* let the server post the sr */
 	if (!config.server_name) { //server
-		if (post_send(&res, IBV_WR_SEND))
+		if (post_send(&res, IBV_WR_SEND, 0))
 		{
 			fprintf(stderr, "failed to post sr\n");
 			goto main_exit;
@@ -1114,9 +1196,9 @@ Note that the server has no idea these events have occured */
 	if (config.server_name)
 	{ // frank client. rdma read, then poll complte; next rdma write it and poll cq
 		int i = 0;
-	for (i=0; i<10; i++) {
+		for (i=0; i<10; i++) {
 		/* First we read contens of server's buffer */
-		if (post_send(&res, IBV_WR_RDMA_READ))
+		if (post_send(&res, IBV_WR_RDMA_READ, i))
 		{
 			fprintf(stderr, "failed to post SR 2\n");
 			rc = 1;
@@ -1128,8 +1210,8 @@ Note that the server has no idea these events have occured */
 			rc = 1;
 			goto main_exit;
 		}
-		fprintf(stdout, "Contents of server's buffer [%d]: %s\n", i, res.buf);
-		memset(res.buf, 0, MSG_SIZE);
+		//fprintf(stdout, "Contents of server's buffer [%d]: %s\n", i, res.buf);
+		memset(res.buf, 0, config.buf_sz);
 		/* Now we replace what's in the server's buffer */
 /*
 		strcpy(res.buf, RDMAMSGW);
