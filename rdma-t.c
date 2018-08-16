@@ -40,7 +40,7 @@ static int page_size;
 #define RDMAMSGR "RDMA read operation "
 #define RDMAMSGW "RDMA write operation"
 //#define MSG_SIZE (strlen(MSG) + 1)
-#define MSG_SIZE (1024) // works in 1024
+#define MSG_SIZE (38535168) // works in 1456 (1500/1024); 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 static inline uint64_t htonll(uint64_t x) { return bswap_64(x); }
 static inline uint64_t ntohll(uint64_t x) { return bswap_64(x); }
@@ -270,6 +270,7 @@ static int poll_completion(struct resources *res)
 		gettimeofday(&cur_time, NULL);
 		cur_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
 	} while ((poll_result == 0) && ((cur_time_msec - start_time_msec) < MAX_POLL_CQ_TIMEOUT));
+
 	if (poll_result < 0)
 	{
 		/* poll CQ failed */
@@ -698,11 +699,11 @@ static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dli
 	int rc;
 	memset(&attr, 0, sizeof(attr));
 	attr.qp_state = IBV_QPS_RTR;
-	attr.path_mtu = IBV_MTU_4096;
+	attr.path_mtu = IBV_MTU_4096; // better to same as 'ibv_devinfo', or change it via 'ifconfig enp130s0 mtu 4200'
 	attr.dest_qp_num = remote_qpn;
 	attr.rq_psn = 0;
 	attr.max_dest_rd_atomic = 1;
-	attr.min_rnr_timer = 0x12; //frank or 0x12
+	attr.min_rnr_timer = 12; //frank or 0x12
 	attr.ah_attr.is_global = 0;
 	attr.ah_attr.dlid = dlid;
 	attr.ah_attr.sl = 0;
