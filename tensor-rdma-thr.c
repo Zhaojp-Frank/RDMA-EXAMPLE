@@ -1076,7 +1076,7 @@ static void usage(const char *argv0)
 // handle based on dev idx: each with port, devFile
 void* run_thread(void *args)
 {
-	int rc = -1;
+	long rc = -1;
 	struct resources res;
 	char temp_char;
 	int devId = (long) args;
@@ -1287,7 +1287,7 @@ int main(int argc, char *argv[])
 	/* init all of the resources, so cleanup will be easy */
 
 ////// launch thread per dev
-	int i           = 0;
+	long i           = 0;
 	pthread_t           *threads = NULL;
 	pthread_attr_t       attr;
 	void                *status;
