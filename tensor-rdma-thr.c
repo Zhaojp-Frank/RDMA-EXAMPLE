@@ -48,7 +48,7 @@ static int page_size;
 #define RDMAMSGR "RDMA read operation "
 #define RDMAMSGW "RDMA write operation"
 //#define MSG_SIZE (strlen(MSG) + 1)
-#define MSG_SIZE (68660224) // resnet50(batch64): 38535168 38535424 works;68659968 68660224 works in 1456 (1500/1024); 
+#define MSG_SIZE (68660224) // resnet50(batch64): 38535168 38535424 works;68659968 68660224 works in 1456 (1500/1024, 4200/4096); 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 static inline uint64_t htonll(uint64_t x) { return bswap_64(x); }
 static inline uint64_t ntohll(uint64_t x) { return bswap_64(x); }
@@ -104,7 +104,7 @@ struct resources
 };
 
 struct config_t config = {
-	NULL,  /* dev_name */
+	"mlx5_0",  /* dev_name */
 	NULL,  /* server_name */
 	19875, /* tcp_port */
 	1,	 /* ib_port */
@@ -496,9 +496,10 @@ static int prepare_tensorMem(struct resources *res, int fillIt, int devIdx)
         dataFileSz = st.st_size;
 			}
       mapIt = mmap(NULL, dataFileSz, PROT_READ, MAP_SHARED, fd, 0); 
-      memcpy(curOffset,  mapIt+dataOffset, dataSz);
-      curOffset += dataSz;
+      memcpy(res->buf+buf_offset,  mapIt+dataOffset, dataSz);
+      buf_offset += dataSz;
 			rc = munmap(mapIt, dataFileSz); assert(rc == 0);	
+      //printf("Removing tensor:%s\n", fileP);fflush(stdout); snprintf(cmd, sizeof(cmd), "rm -rf %s", fileP); int err = system(cmd);
 
 			// label
       snprintf(fileP, sizeof(fileP), "%s/label-dev%d-loop%d", dirP, devId, j);       
@@ -511,17 +512,18 @@ static int prepare_tensorMem(struct resources *res, int fillIt, int devIdx)
         labelFileSz = st.st_size;
 			}
       mapIt = mmap(NULL, labelFileSz, PROT_READ, MAP_SHARED, fd, 0); 
-    	int *p = (int *)curOffset;
+    	int *p = (int *)(res->buf + buf_offset);
     	char *pChar= (char *)mapIt + labelOffset;
 			//label serialized as 1B, turn it as 4B
 			int i  = 0;
     	for (i = 0; i< batchSz; i++) {
       	memcpy(p+i, pChar+i, 1);
-      	//printf("%x ", *(p+i)); if (i%8 ==0) {printf("\n");fflush(stdout); }
+      	printf("%x ", *(p+i)); if (i%8 ==0) {printf("\n");fflush(stdout); }
     	}
-      curOffset += labelSz;
+      buf_offset += labelSz;
 
 			rc = munmap(mapIt, labelFileSz); assert(rc == 0);	
+      //printf("Removing tensor:%s\n", fileP);fflush(stdout); snprintf(cmd, sizeof(cmd), "rm -rf %s", fileP); int err = system(cmd);
 			crc = crc32(crc, res->buf+(dataSz+labelSz)*j, dataSz+labelSz);
 			int *pD = (int *)(res->buf+(dataSz+labelSz)*j);
 			printf("Fill dev %d batch %d, %x %x crc:%x\n", devId, j, *pD, *(pD+1), crc);
@@ -606,7 +608,7 @@ static int resources_create(struct resources *res, int devId)
 		if (!config.dev_name)
 		{
 			config.dev_name = strdup(ibv_get_device_name(dev_list[i]));
-			fprintf(stdout, "device not specified, using first one found: %s\n", config.dev_name);
+			fprintf(stdout, "Device not specified, using first one found: %s\n", config.dev_name);
 		}
 		if (!strcmp(ibv_get_device_name(dev_list[i]), config.dev_name))
 		{
@@ -617,9 +619,11 @@ static int resources_create(struct resources *res, int devId)
 	/* if the device wasn't found in host */
 	if (!ib_dev)
 	{
-		fprintf(stderr, "IB device %s wasn't found\n", config.dev_name);
-		rc = 1;
-		goto resources_create_exit;
+		if (config.dev_name) {
+			fprintf(stderr, "IB device %s wasn't found, usig the first one %s\n", config.dev_name, ibv_get_device_name(dev_list[0]));
+			ib_dev = dev_list[0];
+			config.dev_name = strdup(ibv_get_device_name(dev_list[0]));
+		}
 	}
 	/* get device handle */
 	res->ib_ctx = ibv_open_device(ib_dev);
@@ -649,7 +653,7 @@ static int resources_create(struct resources *res, int devId)
 		goto resources_create_exit;
 	}
 	/* each side will send only one WR, so Completion Queue with 1 entry is enough */
-	cq_size = 1; //frank may enlarge it? i.e., 2~4?
+	cq_size = 4; //frank may enlarge it? i.e., 2~4?
 	res->cq = ibv_create_cq(res->ib_ctx, cq_size, NULL, NULL, 0);
 	if (!res->cq)
 	{
@@ -788,7 +792,7 @@ static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dli
 	int rc;
 	memset(&attr, 0, sizeof(attr));
 	attr.qp_state = IBV_QPS_RTR;
-	attr.path_mtu = IBV_MTU_1024; // same as 'ibv_devinfo' in both c/s, or else change it via 'ifconfig enp130s0 mtu 4200'
+	attr.path_mtu = IBV_MTU_4096; // same as 'ibv_devinfo' in both c/s, or else change it via 'ifconfig enp130s0 mtu 4200'
 	attr.dest_qp_num = remote_qpn;
 	attr.rq_psn = 0;
 	attr.max_dest_rd_atomic = 1;
@@ -804,7 +808,7 @@ static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dli
 		attr.ah_attr.port_num = 1;
 		memcpy(&attr.ah_attr.grh.dgid, dgid, 16);
 		attr.ah_attr.grh.flow_label = 0;
-		attr.ah_attr.grh.hop_limit = 8;
+		attr.ah_attr.grh.hop_limit = 0xff;
 		attr.ah_attr.grh.sgid_index = config.gid_idx;
 		attr.ah_attr.grh.traffic_class = 0;
 	}
@@ -1178,8 +1182,7 @@ main_exit:
 		fprintf(stderr, "failed to destroy resources\n");
 		rc = -1;
 	}
-	if (config.dev_name)
-		free((char *)config.dev_name);
+	// if (config.dev_name) free((char *)config.dev_name);
 	return (void *)(rc);
 /*
 	if (rc == 0)
@@ -1277,8 +1280,8 @@ int main(int argc, char *argv[])
 	config.dataSz = 38535168;
 	config.labelSz= 256;
 	config.batchSz= 64;
-	config.batchNum= 19;
-	config.devNum= 2;
+	config.batchNum= 29;
+	config.devNum= 1;
 	config.buf_sz = config.dataSz + config.labelSz;
 	init_crc_table();
 
