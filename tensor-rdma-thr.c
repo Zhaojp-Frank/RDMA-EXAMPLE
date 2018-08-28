@@ -328,7 +328,7 @@ static int poll_completion(struct resources *res)
 * Description
 * This function will create and post a send work request
 ******************************************************************************/
-static int post_send(struct resources *res, int opcode, int iter)
+static int post_send(struct resources *res, int opcode, size_t iter)
 {
 	struct ibv_send_wr sr;
 	struct ibv_sge sge;
@@ -349,8 +349,9 @@ static int post_send(struct resources *res, int opcode, int iter)
 	sr.send_flags = IBV_SEND_SIGNALED;
 	if (opcode != IBV_WR_SEND)
 	{
+		size_t offset = iter*config.buf_sz;
+		printf("Remote addr iter:%ld, baseAddr:%lx offset:%lx\n", iter, res->remote_props.addr, offset);
 		sr.wr.rdma.remote_addr = res->remote_props.addr + iter*config.buf_sz; //frank able to access via rAddr+offet
-		//printf("Remote addr[%d]: %lx \n", iter, sr.wr.rdma.remote_addr);
 		sr.wr.rdma.rkey = res->remote_props.rkey;
 	}
 	/* there is a Receive Request in the responder side, so we won't get any into RNR flow */
@@ -447,7 +448,8 @@ static int prepare_tensorMem(struct resources *res, int fillIt, int devIdx)
   //snprintf(dirP, sizeof(dirP), "/run/remoteP/%s", CLPREFETCH(uuid));
   //
 	// ResNet50: batch=64
-  int dataSz = config.dataSz, labelSz= config.labelSz, batchSz=config.batchSz, batchStep =config.batchNum, totalSz = 0;
+  size_t dataSz = config.dataSz, labelSz= config.labelSz, batchSz=config.batchSz, batchStep =config.batchNum;
+	size_t totalSz = 0;
   char fileP[96], cmd[96];
 	char *dirP ="/var/run/remoteP/uuid123";
 	int devId = devIdx, rc =0;
@@ -460,7 +462,7 @@ static int prepare_tensorMem(struct resources *res, int fillIt, int devIdx)
 	} else {
 		totalSz = (dataSz+labelSz);
 	}
-	printf("To alloc buf sz:%u\n", totalSz);
+	printf("To alloc buf sz:%lu \n", totalSz);
 	posix_memalign((void **)&res->buf, page_size, totalSz); 	
 	assert(res->buf);
 	memset(res->buf, 0, totalSz);
@@ -479,7 +481,7 @@ static int prepare_tensorMem(struct resources *res, int fillIt, int devIdx)
 	}
 
 	// Copy tensors into the buf. for server side
-	int buf_offset = 0, dataFileSz = 0, labelFileSz = 0, j=0;
+	size_t buf_offset = 0; int dataFileSz = 0, labelFileSz = 0, j=0;
 	void *mapIt = NULL;
 	char *curOffset = res->buf;
 	for (j= 0; j< batchStep; j++) {
@@ -488,7 +490,7 @@ static int prepare_tensorMem(struct resources *res, int fillIt, int devIdx)
 			// data tensor
       snprintf(fileP, sizeof(fileP), "%s/data-dev%d-loop%d-%d", dirP, devId, j, splitF);       
       char *fp = fileP;
-			//printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
+			printf("To pack in-mem label tensor file:%s for dev:%u loop:%u\n", fileP, devId, j); //fflush(stdout);
 			while (1) { fd = open(fp, O_RDONLY, 0); if (fd>0) break; } assert(fd != -1);
 			if (j == 0) {
         struct stat st;
@@ -515,18 +517,16 @@ static int prepare_tensorMem(struct resources *res, int fillIt, int devIdx)
     	int *p = (int *)(res->buf + buf_offset);
     	char *pChar= (char *)mapIt + labelOffset;
 			//label serialized as 1B, turn it as 4B
-			int i  = 0;
-    	for (i = 0; i< batchSz; i++) {
-      	memcpy(p+i, pChar+i, 1);
-      	printf("%x ", *(p+i)); if (i%8 ==0) {printf("\n");fflush(stdout); }
+			int i  = 0; for (i = 0; i< batchSz; i++) {
+        memcpy(p+i, pChar+i, 1); //printf("%x ", *(p+i)); if (i%8 ==0) {printf("\n");fflush(stdout); }
     	}
       buf_offset += labelSz;
 
 			rc = munmap(mapIt, labelFileSz); assert(rc == 0);	
       //printf("Removing tensor:%s\n", fileP);fflush(stdout); snprintf(cmd, sizeof(cmd), "rm -rf %s", fileP); int err = system(cmd);
-			crc = crc32(crc, res->buf+(dataSz+labelSz)*j, dataSz+labelSz);
-			int *pD = (int *)(res->buf+(dataSz+labelSz)*j);
-			printf("Fill dev %d batch %d, %x %x crc:%x\n", devId, j, *pD, *(pD+1), crc);
+			//crc = crc32(crc, res->buf+(dataSz+labelSz)*j, dataSz+labelSz);
+			//int *pD = (int *)(res->buf+(dataSz+labelSz)*j);
+			//printf("Fill dev %d batch %d, %x %x crc:%x\n", devId, j, *pD, *(pD+1), crc);
     }
 
 	return rc;
@@ -1074,7 +1074,8 @@ static void usage(const char *argv0)
 	fprintf(stdout, " -d, --ib-dev <dev> use IB device <dev> (default first device found)\n");
 	fprintf(stdout, " -i, --ib-port <port> use port <port> of IB device (default 1)\n");
 	fprintf(stdout, " -g, --gid_idx <git index> gid index to be used in GRH (default not used, required for RoCE)\n");
-	fprintf(stdout, " -s, --size <msg size> (default 1024B)\n");
+	fprintf(stdout, " -v, --vGPUNum <GPUDev#> (default 1)\n");
+	fprintf(stdout, " -b, --batchNum <batchNum> (default 100)\n");
 }
 
 // handle based on dev idx: each with port, devFile
@@ -1134,19 +1135,16 @@ Note that the server has no idea these events have occured */
 			unsigned int crc = 0xffffffff;
 			memset(res.buf, 0, config.buf_sz);
 		/* First we read contens of server's buffer */
-		if (post_send(&res, IBV_WR_RDMA_READ, i))
-		{
-			fprintf(stderr, "failed to post SR 2\n");
-			goto main_exit;
+		if (post_send(&res, IBV_WR_RDMA_READ, i)) {
+			fprintf(stderr, "failed to post SR 2\n"); goto main_exit;
 		}
-		if (poll_completion(&res))
-		{
-			fprintf(stderr, "poll completion failed 2\n");
-			goto main_exit;
+		if (poll_completion(&res)) {
+			fprintf(stderr, "poll completion failed 2\n"); goto main_exit;
 		}
-		crc = crc32(crc, res.buf, config.buf_sz);
-		int *pD = (int *)res.buf;
-		printf("Got dev %d batch %d tensor, %x %x crc:%x\n", devId, i, *pD, *(pD+1), crc);
+		//crc = crc32(crc, res.buf, config.buf_sz);
+		//int *pD = (int *)res.buf;
+		//printf("Got dev %d batch %d tensor, %x %x crc:%x\n", devId, i, *pD, *(pD+1), crc);
+		printf("Got dev %d batch %d tensor\n", devId, i);
 
 		/* Now we replace what's in the server's buffer */
 /*
@@ -1213,6 +1211,11 @@ int main(int argc, char *argv[])
 	struct resources res;
 	int rc = 1;
 	char temp_char;
+	config.dataSz = 38535168;
+	config.labelSz= 256;
+	config.batchSz= 64;
+	config.batchNum= 108;
+	config.devNum= 1;
 	/* parse the command line parameters */
 	while (1)
 	{
@@ -1222,10 +1225,12 @@ int main(int argc, char *argv[])
 			{.name = "ib-dev", .has_arg = 1, .val = 'd'},
 			{.name = "ib-port", .has_arg = 1, .val = 'i'},
 			{.name = "gid-idx", .has_arg = 1, .val = 'g'},
+			{.name = "batchNum", .has_arg = 1, .val = 'b'},
+			{.name = "vGPUNum", .has_arg = 1, .val = 'v'},
 			{.name = "size", .has_arg = 1, .val = 's'},
 			{.name = NULL, .has_arg = 0, .val = '\0'}
         };
-		c = getopt_long(argc, argv, "p:d:i:g:s", long_options, NULL);
+		c = getopt_long(argc, argv, "p:d:i:g:b:v:s", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c)
@@ -1254,10 +1259,20 @@ int main(int argc, char *argv[])
 			break;
 		case 's':
 			config.buf_sz = strtoul(optarg, NULL, 0);
-			if (config.buf_sz < 0)
-			{
-				usage(argv[0]);
-				return 1;
+			if (config.buf_sz < 0) {
+				usage(argv[0]); return 1;
+			}
+			break;
+		case 'v':
+			config.devNum= strtoul(optarg, NULL, 0);
+			if (config.devNum < 0) {
+				usage(argv[0]); return 1;
+			}
+			break;
+		case 'b':
+			config.batchNum= strtoul(optarg, NULL, 0);
+			if (config.batchNum < 0) {
+				usage(argv[0]); return 1;
 			}
 			break;
 		default:
@@ -1277,18 +1292,12 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	page_size = sysconf(_SC_PAGESIZE);
-	config.dataSz = 38535168;
-	config.labelSz= 256;
-	config.batchSz= 64;
-	config.batchNum= 29;
-	config.devNum= 1;
 	config.buf_sz = config.dataSz + config.labelSz;
 	init_crc_table();
 
 	/* print the used parameters for info*/
 	print_config();
 	/* init all of the resources, so cleanup will be easy */
-
 ////// launch thread per dev
 	long i           = 0;
 	pthread_t           *threads = NULL;

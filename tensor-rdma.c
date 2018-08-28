@@ -522,9 +522,9 @@ static int prepare_tensorMem(struct resources *res, int fillIt)
       curOffset += labelSz;
 
 			rc = munmap(mapIt, labelFileSz); assert(rc == 0);	
-			//crc = crc32(crc, res->buf+(dataSz+labelSz)*j, dataSz+labelSz);
-			//pD = (int *)(res->buf+(dataSz+labelSz)*j);
-			//printf("Fill tensor [%d], %x %x crc:%x\n", j, *pD, *(pD+1), crc);
+			crc = crc32(crc, res->buf+(dataSz+labelSz)*j, dataSz+labelSz);
+			pD = (int *)(res->buf+(dataSz+labelSz)*j);
+			printf("Fill tensor [%d], %x %x crc:%x\n", j, *pD, *(pD+1), crc);
     }
 
 	return rc;
@@ -1161,7 +1161,7 @@ int main(int argc, char *argv[])
 	config.labelSz= 256;
 	config.batchSz= 64;
 	config.batchNum= 19;
-	config.devNum= 1;
+	config.devNum= 2;
 	config.buf_sz = config.dataSz + config.labelSz;
 	init_crc_table();
 
@@ -1230,9 +1230,9 @@ Note that the server has no idea these events have occured */
 			rc = 1;
 			goto main_exit;
 		}
-		//crc = crc32(crc, res.buf, config.buf_sz);
-		//int *pD = (int *)res.buf;
-		//printf("Got tensor [%d], %x %x crc:%x\n", i, *pD, *(pD+1), crc);
+		crc = crc32(crc, res.buf, config.buf_sz);
+		int *pD = (int *)res.buf;
+		printf("Got tensor [%d], %x %x crc:%x\n", i, *pD, *(pD+1), crc);
 
 		/* Now we replace what's in the server's buffer */
 /*
